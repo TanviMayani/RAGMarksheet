@@ -1,46 +1,118 @@
 import os
-import threading
-import time
+import uuid
+import tempfile
 import streamlit as st
 import httpx
 
-# API Configuration (supports Streamlit secrets, environment variables, or local fallback)
+# Sync Streamlit secrets to os.environ so all backend modules can access them
 try:
-    API_URL = st.secrets.get("API_URL", os.getenv("API_URL", "http://127.0.0.1:8000"))
+    if hasattr(st, "secrets"):
+        for k, v in st.secrets.items():
+            if isinstance(v, str) and k not in os.environ:
+                os.environ[k] = v
 except Exception:
-    API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
+    pass
 
-# Auto-start FastAPI backend in background thread if hosted all-in-one (e.g. Streamlit Community Cloud)
-@st.cache_resource
-def ensure_backend_running():
+# Import backend services directly for robust, zero-latency in-memory execution
+from backend.pdf_parser import process_pdf
+from backend.validator import is_marksheet
+from backend.chunker import chunk_pages
+from backend.vector_store import store_chunks, clear_all_documents
+from backend.retriever import retrieve_relevant_chunks
+from backend.llm import generate_answer
+
+# Check if an external remote API URL is specified
+API_URL = os.getenv("API_URL", "")
+IS_REMOTE_API = API_URL.startswith("http://") or API_URL.startswith("https://")
+if IS_REMOTE_API and ("127.0.0.1" in API_URL or "localhost" in API_URL):
+    IS_REMOTE_API = False
+
+# Backend service helper wrappers (Supports both direct in-memory and remote API)
+def handle_upload(file):
+    if IS_REMOTE_API:
+        files = {"file": (file.name, file.getvalue(), "application/pdf")}
+        response = httpx.post(f"{API_URL}/upload", files=files, timeout=120.0)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            detail = response.json().get("detail", "Error processing file.")
+            return {"success": False, "message": detail}
+    
+    # In-memory direct execution
+    if not file.name.lower().endswith(".pdf"):
+        return {"success": False, "message": "Please upload a valid PDF file."}
+        
+    doc_id = str(uuid.uuid4())
+    os.makedirs("uploads", exist_ok=True)
+    temp_path = os.path.join("uploads", f"{doc_id}_{file.name}")
+    
     try:
-        res = httpx.get(f"{API_URL}/health", timeout=1.0)
+        with open(temp_path, "wb") as f:
+            f.write(file.getvalue())
+            
+        pages_data = process_pdf(temp_path)
+        if not pages_data:
+            return {"success": False, "message": "Unable to extract readable text from this marksheet."}
+            
+        if not is_marksheet(pages_data):
+            return {"success": False, "message": "The uploaded document does not appear to be a marksheet."}
+            
+        chunks = chunk_pages(pages_data, doc_id, filename=file.name)
+        if not chunks:
+            return {"success": False, "message": "Unable to process marksheet chunks. Please try again."}
+            
+        store_chunks(chunks)
+        
+        methods = {p.get("method", "text") for p in pages_data}
+        overall_method = "Mixed Text + OCR" if len(methods) > 1 else ("Text" if "text" in methods else "OCR")
+        
+        return {
+            "success": True,
+            "document_id": doc_id,
+            "filename": file.name,
+            "pages": len(pages_data),
+            "processing_method": overall_method
+        }
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+def handle_chat(question, document_id=None, document_ids=None, chat_history=None):
+    if IS_REMOTE_API:
+        payload = {
+            "question": question,
+            "document_id": document_id,
+            "document_ids": document_ids,
+            "chat_history": chat_history or []
+        }
+        res = httpx.post(f"{API_URL}/chat", json=payload, timeout=60.0)
         if res.status_code == 200:
-            return True
-    except Exception:
-        pass
+            return res.json()
+        else:
+            return {"answer": f"Error from backend: {res.text}", "sources": []}
+            
+    # In-memory direct execution
+    chunks = retrieve_relevant_chunks(
+        question=question,
+        document_id=document_id,
+        document_ids=document_ids
+    )
+    answer, sources = generate_answer(question, chunks, chat_history or [])
+    return {"answer": answer, "sources": sources}
 
-    if "127.0.0.1" in API_URL or "localhost" in API_URL:
+def handle_clear():
+    if IS_REMOTE_API:
         try:
-            import uvicorn
-            from backend.main import app as fastapi_app
-            def run_server():
-                uvicorn.run(fastapi_app, host="127.0.0.1", port=8000, log_level="warning")
-            thread = threading.Thread(target=run_server, daemon=True)
-            thread.start()
-            for _ in range(15):
-                try:
-                    r = httpx.get(f"{API_URL}/health", timeout=1.0)
-                    if r.status_code == 200:
-                        return True
-                except Exception:
-                    time.sleep(0.5)
-        except Exception as e:
-            print(f"Could not auto-start embedded backend: {e}")
-    return False
+            httpx.post(f"{API_URL}/clear", timeout=10.0)
+        except Exception:
+            pass
+    else:
+        clear_all_documents()
 
-ensure_backend_running()
-
+# ----------------- Streamlit UI -----------------
 st.set_page_config(page_title="Marksheet AI Assistant", page_icon="🎓", layout="wide")
 
 st.title("🎓 Marksheet AI Assistant")
@@ -74,26 +146,19 @@ with st.sidebar:
                     
                 st.write(f"Processing **{file.name}**...")
                 try:
-                    files = {"file": (file.name, file.getvalue(), "application/pdf")}
-                    response = httpx.post(f"{API_URL}/upload", files=files, timeout=120.0)
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        if data.get("success"):
-                            st.session_state.documents.append({
-                                "document_id": data["document_id"],
-                                "filename": data.get("filename") or file.name,
-                                "pages": data["pages"],
-                                "method": data["processing_method"]
-                            })
-                            st.write(f"✅ **{file.name}** processed successfully!")
-                        else:
-                            st.error(f"❌ {file.name}: {data.get('message', 'Validation failed.')}")
+                    data = handle_upload(file)
+                    if data.get("success"):
+                        st.session_state.documents.append({
+                            "document_id": data["document_id"],
+                            "filename": data.get("filename") or file.name,
+                            "pages": data["pages"],
+                            "method": data["processing_method"]
+                        })
+                        st.write(f"✅ **{file.name}** processed successfully!")
                     else:
-                        err_detail = response.json().get("detail", "Error processing file.")
-                        st.error(f"❌ {file.name}: {err_detail}")
+                        st.error(f"❌ {file.name}: {data.get('message', 'Validation failed.')}")
                 except Exception as e:
-                    st.error(f"❌ Failed to connect to backend for {file.name}: {e}")
+                    st.error(f"❌ Failed to process {file.name}: {e}")
                     
             status.update(label="Processing Finished!", state="complete", expanded=False)
             
@@ -108,10 +173,7 @@ with st.sidebar:
                 st.caption(f"Pages: {doc['pages']} | Method: {doc['method']}")
                 
         if st.button("🗑️ Clear All Marksheets", use_container_width=True):
-            try:
-                httpx.post(f"{API_URL}/clear", timeout=10.0)
-            except Exception:
-                pass
+            handle_clear()
             st.session_state.documents = []
             st.session_state.chat_history = []
             st.session_state.selected_scope = "all"
@@ -176,46 +238,39 @@ if st.session_state.documents:
         with st.chat_message("assistant"):
             with st.spinner("Analyzing marksheet data..."):
                 try:
-                    # Pass the active session document_ids when scope is 'all'
                     if st.session_state.selected_scope == "all":
-                        payload = {
-                            "document_ids": [doc["document_id"] for doc in st.session_state.documents],
-                            "question": prompt,
-                            "chat_history": st.session_state.chat_history[:-1]
-                        }
+                        chat_res = handle_chat(
+                            question=prompt,
+                            document_ids=[doc["document_id"] for doc in st.session_state.documents],
+                            chat_history=st.session_state.chat_history[:-1]
+                        )
                     else:
-                        payload = {
-                            "document_id": st.session_state.selected_scope,
-                            "question": prompt,
-                            "chat_history": st.session_state.chat_history[:-1]
-                        }
-                    res = httpx.post(f"{API_URL}/chat", json=payload, timeout=60.0)
+                        chat_res = handle_chat(
+                            question=prompt,
+                            document_id=st.session_state.selected_scope,
+                            chat_history=st.session_state.chat_history[:-1]
+                        )
                     
-                    if res.status_code == 200:
-                        chat_res = res.json()
-                        answer = chat_res["answer"]
-                        sources = chat_res.get("sources", [])
+                    answer = chat_res.get("answer", "")
+                    sources = chat_res.get("sources", [])
+                    
+                    full_response = answer
+                    if sources:
+                        source_texts = []
+                        for s in sources:
+                            fname = s.get("filename") or "marksheet.pdf"
+                            page = s.get("page", 1)
+                            source_texts.append(f"`{fname}` (Page {page})")
+                        source_line = "\n\n📄 **Sources:** " + ", ".join(source_texts)
+                        full_response += source_line
                         
-                        full_response = answer
-                        if sources:
-                            source_texts = []
-                            for s in sources:
-                                fname = s.get("filename") or "marksheet.pdf"
-                                page = s.get("page", 1)
-                                source_texts.append(f"`{fname}` (Page {page})")
-                            source_line = "\n\n📄 **Sources:** " + ", ".join(source_texts)
-                            full_response += source_line
-                            
-                        st.markdown(full_response)
-                        
-                        st.session_state.chat_history.append({
-                            "role": "assistant",
-                            "content": full_response
-                        })
-                    else:
-                        st.error(f"Failed to get answer from backend: {res.text}")
+                    st.markdown(full_response)
+                    
+                    st.session_state.chat_history.append({
+                        "role": "assistant",
+                        "content": full_response
+                    })
                 except Exception as e:
-                    st.error(f"Connection error: {e}")
+                    st.error(f"Error generating answer: {e}")
 else:
     st.info("👈 Please upload your marksheet PDF(s) in the sidebar and click **'Process Marksheets'** to start chatting.")
-
