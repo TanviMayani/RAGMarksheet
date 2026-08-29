@@ -8,7 +8,9 @@ chromadb
 openai
 pydantic
 pydantic-settings
+opencv-python-headless
 rapidocr-onnxruntime
 Pillow
 httpx
 pytest
+
