@@ -109,7 +109,12 @@ def handle_chat(question, document_id=None, document_ids=None, chat_history=None
         document_ids=document_ids
     )
     answer, sources = generate_answer(question, chunks, chat_history or [])
-    return {"answer": answer, "sources": sources}
+    serialized_sources = [
+        {"filename": s.filename, "page": s.page, "processing_method": s.processing_method}
+        if hasattr(s, "filename") else s
+        for s in sources
+    ]
+    return {"answer": answer, "sources": serialized_sources}
 
 def handle_clear():
     if IS_REMOTE_API:
@@ -266,8 +271,8 @@ if st.session_state.documents:
                     if sources:
                         source_texts = []
                         for s in sources:
-                            fname = s.get("filename") or "marksheet.pdf"
-                            page = s.get("page", 1)
+                            fname = getattr(s, "filename", None) or (s.get("filename") if isinstance(s, dict) else "marksheet.pdf")
+                            page = getattr(s, "page", None) or (s.get("page", 1) if isinstance(s, dict) else 1)
                             source_texts.append(f"`{fname}` (Page {page})")
                         source_line = "\n\n📄 **Sources:** " + ", ".join(source_texts)
                         full_response += source_line
