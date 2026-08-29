@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+streamlit
+python-multipart
+python-dotenv
+pymupdf
+chromadb
+openai
+pydantic
+pydantic-settings
+rapidocr-onnxruntime
+Pillow
+httpx
+pytest
