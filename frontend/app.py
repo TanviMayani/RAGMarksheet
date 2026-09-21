@@ -22,6 +22,12 @@ except Exception:
     pass
 
 # Import backend services directly for robust, zero-latency in-memory execution
+import importlib
+import backend.validator
+import backend.llm
+importlib.reload(backend.validator)
+importlib.reload(backend.llm)
+
 from backend.pdf_parser import process_pdf
 from backend.validator import is_marksheet
 from backend.chunker import chunk_pages

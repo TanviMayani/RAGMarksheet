@@ -23,10 +23,9 @@ def format_context(chunks: List[Dict[str, Any]]) -> str:
     return "\n\n".join(context_parts)
 
 FALLBACK_MODELS = [
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "google/gemma-4-26b-a4b-it:free",
     "nvidia/nemotron-3.5-lightning:free",
-    "minimax/minimax-m2.7:free",
-    "google/gemma-4-31b-it:free",
-    "liquid/lfm-2.5-2.6b:free",
 ]
 
 def generate_answer(question: str, chunks: List[Dict[str, Any]], chat_history: List[Dict[str, str]] = None) -> Tuple[str, List[Source]]:
@@ -43,20 +42,24 @@ def generate_answer(question: str, chunks: List[Dict[str, Any]], chat_history: L
 Your ONLY source of truth is the provided marksheet context. You can answer questions about individual marksheets or compare across multiple marksheets if provided.
 
 Rules:
-1. Answer only using the provided context.
-2. Never invent student information.
-3. Never invent marks.
-4. Never invent subjects.
-5. Never invent CGPA or SGPA.
-6. Never assume missing information.
-7. If the answer is not present in the provided context, say:
+1. Answer strictly using the provided marksheet context. Never invent student details, marks, subjects, or grades.
+2. Universal Grading & Ranking Methodology (Applies to all universities & boards):
+   - Marksheets use different evaluation systems (Letter grades, Grade Points, GPA, or Percentages).
+   - When asked to identify the LOWEST or HIGHEST marks/grades or rank subjects:
+     a. Check the document's own grading table, pattern, or legend (which maps grades to Grade Points or Percentage ranges).
+     b. Determine the numerical grade points/percentages for each subject:
+        * HIGHEST marks/grade = the subject(s) with the MAXIMUM (largest) grade point or percentage.
+        * LOWEST marks/grade = the subject(s) with the MINIMUM (smallest) grade point or percentage.
+     c. List the relevant subjects with their course code, course name, evaluation type (Theory/Practical), grade, and corresponding grade points/percentage.
+     d. Never confuse a letter grade with an unrelated footnote abbreviation (e.g., do not assume 'O' means 'Unsatisfactory' or 'Zero' when a table maps 'O' to 10 points or 90-100%).
+3. Never assume missing information.
+4. If the answer is not present in the provided context, say:
    "I couldn't find that information in the uploaded marksheet(s)."
-8. If the question is unrelated to the marksheet, say:
+5. If the question is unrelated to the marksheet, say:
    "I can only answer questions related to the uploaded marksheet(s)."
-9. Keep answers concise, factual, and easy to understand. When multiple marksheets are present, clarify which document/semester you are referencing.
-10. Do not use external knowledge.
-11. Do not silently correct OCR errors.
-12. If information is unclear, say it is unclear instead of guessing.
+6. Keep answers concise, factual, and well-structured with bullet points or tables where appropriate.
+7. Do not use external knowledge or correct OCR errors silently.
+8. If information is unclear, say it is unclear instead of guessing.
 
 MARKSHEET CONTEXT:
 {context}
